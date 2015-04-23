@@ -5,9 +5,6 @@ Blocking Tutorial
 This is a tutorial internal to the Hazy Research group to illustrate SIMD
 and cache blocking.
 
-For any questions contact Hazy Research
-( Stefan Hadjis, shadjis@stanford.edu )
-
 Based on the paper:
 Anatomy of High-Performance Many-Threaded Matrix Multiplication
 http://www.cs.utexas.edu/users/flame/pubs/blis3_ipdps14.pdf
@@ -62,11 +59,11 @@ on a Haswell with 2 cores, 4 threads,
     L2$       2 x 256 kB 8-way
     L3$       1 x 4 MB   16-way
 
-Naive       8330.310 milliseconds GFlops=1.699310
-+SIMD       1057.134 milliseconds GFlops=13.390711
-+Blocking   273.5390 milliseconds GFlops=51.750485
-+Threads    138.5209 milliseconds GFlops=102.192277
-OpenBLAS    117.7092 milliseconds GFlops=120.259758
+    Naive       8330.310 milliseconds GFlops=1.699310
+    +SIMD       1057.134 milliseconds GFlops=13.390711
+    +Blocking   273.5390 milliseconds GFlops=51.750485
+    +Threads    138.5209 milliseconds GFlops=102.192277
+    OpenBLAS    117.7092 milliseconds GFlops=120.259758
 
 
 For various N:

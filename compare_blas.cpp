@@ -9,9 +9,6 @@
  * etc. It is meant just as a tutorial introduction to blocking and SIMD.
  * Experiments compare against OpenBLAS.
  *
- * For any questions contact Hazy Research
- * ( Stefan Hadjis, shadjis@stanford.edu )
- *
  ******************************************************************************/
 
 #include <immintrin.h>
