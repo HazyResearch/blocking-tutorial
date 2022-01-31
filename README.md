@@ -39,7 +39,7 @@ To compile:
     bash compile.sh
 
 3. Run with:
-    ./m
+    ./matmul
 
 This will run two of the matrix multiply implementations and compare:
 - The outputs (to ensure they match)
