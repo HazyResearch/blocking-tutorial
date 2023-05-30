@@ -11,6 +11,7 @@
  *
  ******************************************************************************/
 
+#include "my_timer.h"
 #include <immintrin.h>
 #include "cblas.h"
 #include "omp.h"
@@ -21,9 +22,19 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <cstdlib>
-#include <chrono>
+#include <random>
+#include <iostream>
+#include <vector>
+#include <time.h>
+using namespace std;
 
-const int REPEAT = 1;
+#ifdef OMP_NUM_THREADS_MACRO
+constexpr int OMP_NUM_THREADS = OMP_NUM_THREADS_MACRO;
+#else
+constexpr int OMP_NUM_THREADS = 8;
+#endif
+
+const int REPEAT = 10;
 typedef float afloat __attribute__ ((__aligned__(256)));
 
 #define SGEMM_FN sgemm_simd_block_parallel
@@ -106,7 +117,7 @@ inline void sgemm_naive
     bool transpose_A = false;
     bool transpose_B = false;
     assert_sgemm_parameters(/*Order=*/CblasRowMajor, /*TransA=*/CblasNoTrans, /*TransB=*/CblasNoTrans, N, M, K, K, N, N,
-                            transpose_A, transpose_B);
+                            transpose_A, transpose_B);    
     for (int m=0; m<M; ++m) {
         for (int n=0; n<N; ++n) {
             C[m*N + n] = 0;
@@ -141,6 +152,7 @@ inline void sgemm_simd
                             transpose_A, transpose_B);
     assert(!transpose_A);
     assert(!transpose_B);
+    for (int i = 0; i < M * N; i++) C[i] = 0.0;
     for (int m=0; m<M; m+=regsA) {
         for (int n=0; n<N; n+=regsB*8) {
             matmul_dot_inner<regsA, regsB>(A,B,C,M,N,K,m,n);
@@ -169,6 +181,7 @@ inline void sgemm_simd_block
                             transpose_A, transpose_B);
     assert(!transpose_A);
     assert(!transpose_B);
+    for (int i = 0; i < M * N; i++) C[i] = 0.0;
 
     // kc * 16 fits in L1, which is 32 K
     // kc * mc fits in L2, which is 256 K
@@ -212,6 +225,9 @@ inline void sgemm_simd_block_parallel
                             transpose_A, transpose_B);
     assert(!transpose_A);
     assert(!transpose_B);
+    omp_set_num_threads(OMP_NUM_THREADS);
+    #pragma omp parallel for
+    for (int i = 0; i < M * N; i++) C[i] = 0.0;
 
     // kc * 16 fits in L1, which is 32 K
     // kc * mc fits in L2, which is 256 K
@@ -221,9 +237,7 @@ inline void sgemm_simd_block_parallel
     const int mc = 120;
     const int nr = 2 * 8;
     const int mr = 6;
-
-    omp_set_num_threads(8);
-
+    
     // Usually 1 iteration, cannot parallelize
     for (int jc=0; jc<N; jc+=nc) {
         // 8 iterations, not worth parallelizing
@@ -249,7 +263,7 @@ inline void sgemm_simd_block_parallel
 // -----------------------------------------------------------------------------
 
 // Change this line to try other sizes:
-const int n = 16*6*30;  // 16*6*10 (1 million in N^2), 16*6*30 (8 million in N^2)
+const int n = 16*6*50;  // 16*6*10 (1 million in N^2), 16*6*30 (8 million in N^2)
 const int m = n;
 const int k = n;
 
@@ -263,79 +277,83 @@ float out2[m*n]  __attribute__((aligned(256)));
 // -----------------------------------------------------------------------------
 // Comparison against OpenBLAS
 // -----------------------------------------------------------------------------
+mt19937 rng;
+void gen_test(
+  int M, int N, int K,
+  float* __restrict__ X, float* __restrict__ Y
+)
+{
+  #pragma omp parallel for
+  for (int i = 0; i < M; i++)
+    for (int j = 0; j < K; j++)
+      X[i * K + j] = float(rng() % 128) / 128.0;
+
+  #pragma omp parallel for
+  for (int i = 0; i < K; i++)
+    for (int j = 0; j < N; j++)
+      Y[i * N + j] = float(rng() % 128) / 128.0;
+}
+
+//---------------
+volatile double dummy_var;
+constexpr size_t L2_CACHE_ELEMS = (1 << 20) / sizeof(double); // 1 MB L2 cache per core
+vector<double> dummy_cache;
+
+// force (hopefully) all running cores to clear its L2 cache
+void __attribute__ ((noinline)) clear_cache() {
+  size_t dummy_size = L2_CACHE_ELEMS * OMP_NUM_THREADS;
+  dummy_cache.resize(dummy_size);
+  omp_set_num_threads(OMP_NUM_THREADS);
+  #pragma omp parallel for
+  for (size_t i = 0; i < dummy_size; i++) dummy_cache[i] = dummy_var;
+  dummy_var = dummy_cache[rng() % dummy_size];
+}
+
+void get_stats(int M, int N, float* out1, float* out2, double& total_diff, size_t& total_nZeros)
+{
+  double diff = 0.0;
+  size_t nZeros = 0;
+  for(int i = 0; i < M; i++) {
+    for(int j = 0; j < N; j++) {
+      double u = (out1[i*n+j] - out2[i*n+j]);
+      diff += u*u;
+      if (out1[i*n+j] == 0.0) nZeros++;
+    }
+  }
+
+  total_diff += diff;
+  total_nZeros += nZeros;  
+}
+
 int main() {
+  rng.seed(time(NULL));
+  MyTimer timer;
+  double my_cost = 0, blas_cost = 0;
+  double total_diff = 0;
+  size_t total_nZeros = 0;
 
-  // https://stackoverflow.com/questions/22387586/measuring-execution-time-of-a-function-in-c
-  using std::chrono::high_resolution_clock;
-  using std::chrono::duration_cast;
-  using std::chrono::duration;
-  using std::chrono::milliseconds;
-
-  // Generate random data
-  //srand((unsigned int)time(NULL));
-  srand((unsigned int)0x100);
-  std::cout << "Building Matrix: ";
-  for(int i = 0; i < m; i++) {
-    for(int j = 0; j < k; j++) {
-      x[i*k+j] = float(rand()%100) / 100.0;//drand48();
-      xr[j*k+i] = x[i*k+j];
-    }
-  }
-  for(int i = 0; i < k; i++) {
-    for(int j = 0; j < n; j++) {
-      y[i*n+j] = float(rand()%100) / 100.0;//drand48();
-    }
-  }
-  for(int i = 0; i < m; i++){
-    for(int j = 0; j < n; j++) {
-      out1[i*n+j] = 0.0;
-      out2[i*n+j] = 0.0;
-    }
-  }
-  std::cout << "Done." << std::endl;
-
-  // Run manual version
-  auto t_start_mine = high_resolution_clock::now();
-  for(int i = 0; i < REPEAT; i++) {
+  for (int t = 1; t <= REPEAT; t++) {
+    cout << "Running test " << t << "\n";
+    gen_test(m, n, k, x, y);
+    
+    clear_cache();
+    timer.startCounter();
     SGEMM_FN(m, n, k, x, y, out1);
-    /* Select from 1 of these 4 (same arguments)
-            sgemm_naive
-            sgemm_simd
-            sgemm_simd_block
-            sgemm_simd_block_parallel
-    */
-  }
-  auto t_end_mine = high_resolution_clock::now();
-  duration<double, std::milli> ms_double = t_end_mine - t_start_mine;
-  double mtime = ms_double.count();
-  printf("      My GEMM elapsed time: %f ms, GFlops=%f\n", mtime, ((float) REPEAT*2*m*n*k)/(mtime*1e6));
-
-  // Compare to OpenBLAS
-  auto t_start_open = high_resolution_clock::now();
-  for(int i = 0; i < REPEAT; i++) {
+    my_cost += timer.getCounterMsPrecise();
+    
+    clear_cache();
+    timer.startCounter();
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
                 m,n,k, 1.0,x,k,y,n,0.0, out2, n);
+    blas_cost += timer.getCounterMsPrecise();
+    
+    get_stats(m, n, out1, out2, total_diff, total_nZeros);
   }
-  auto t_end_open = high_resolution_clock::now();
-  ms_double = t_end_open - t_start_open;
-  mtime = ms_double.count();
-  printf("OpenBLAS GEMM elapsed time: %f ms, GFlops=%f\n", mtime, ((float) REPEAT*2*m*n*k)/(mtime*1e6));
 
-  // Compare outputs
-  printf("computing diff");
-  float diff = 0.0;
-  for(int i = 0; i < m; i++) {
-    for(int j = 0; j < n; j++) {
-      float u = (out1[i*n+j] - out2[i*n+j]);
-      diff += u*u;
-    }
-  }
-  printf("\tNorm Squared=%f\n", diff);
-  int nZeros = 0;
-  for(int i = 0; i < m; i++) {
-    for(int j = 0; j < n; j++) {
-      if(out1[i*n+j] == 0.0) { nZeros++; }
-    }
-  }
-  printf("\tZeros=%d\n", nZeros);
+  printf("      My GEMM elapsed time: %f ms, GFlops=%f\n", my_cost, ((double) REPEAT*2*m*n*k) / (my_cost*1e6));
+  printf("OpenBLAS GEMM elapsed time: %f ms, GFlops=%f\n", blas_cost, ((double) REPEAT*2*m*n*k) / (blas_cost*1e6));
+  printf("Average square error = %f\n", total_diff / REPEAT);
+  printf("Average nZeros = %f\n", (double)total_nZeros / REPEAT);
+  return 0;
 }
+
